@@ -1,11 +1,11 @@
-const chaiHttp = require('chai-http');
-const chai = require('chai');
-const server = require('../server');
+import chaiHttp from 'chai-http';
+import chai from 'chai';
+import server from '../server';
 const should = chai.should();
 
 chai.use(chaiHttp);
 
-suite('Functional Tests', function() {
+export default suite('Functional Tests', function() {
     describe('Stock Price Checker Functional Tests', function () {
         let stockSymbol = 'MSFT';
         let stockSymbol2 = 'GOOG';
