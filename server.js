@@ -1,8 +1,10 @@
+// server.js (Existing code with Helmet added)
 'use strict';
 require('dotenv').config();
 const express     = require('express');
 const bodyParser  = require('body-parser');
 const cors        = require('cors');
+const helmet      = require('helmet'); // Import Helmet
 
 const apiRoutes         = require('./routes/api.js');
 const fccTestingRoutes  = require('./routes/fcctesting.js');
@@ -17,6 +19,23 @@ app.use(cors({origin: '*'})); //For FCC testing purposes only
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
 
+// Add Helmet middleware for security
+app.use(helmet());  // Use default Helmet settings
+// OR configure specific Helmet features:
+app.use(helmet({
+  contentSecurityPolicy: {  // Example configuration
+      directives: {
+        defaultSrc: ["'self'"],
+        scriptSrc: ["'self'", 'trusted-cdn.com'], // Add trusted sources
+        styleSrc: ["'self'", 'cdn.example.com']
+      }
+    },
+    frameguard: { action: 'deny' },       // Prevent clickjacking
+    hsts: { maxAge: 31536000, includeSubDomains: true },  // Enforce HTTPS
+    xssFilter: true,          // Enable XSS protection
+}));
+
+
 //Index page (static HTML)
 app.route('/')
   .get(function (req, res) {
@@ -26,9 +45,9 @@ app.route('/')
 //For FCC testing purposes
 fccTestingRoutes(app);
 
-//Routing for API 
-apiRoutes(app);  
-    
+//Routing for API
+apiRoutes(app);
+
 //404 Not Found Middleware
 app.use(function(req, res, next) {
   res.status(404)
@@ -53,3 +72,4 @@ const listener = app.listen(process.env.PORT || 3000, function () {
 });
 
 module.exports = app; //for testing
+
