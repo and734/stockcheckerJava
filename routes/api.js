@@ -1,154 +1,117 @@
-// routes/api.js
 'use strict';
 
-const crypto = require('crypto');     // For anonymizing IP addresses
+const mongoose = require('mongoose');
 
-// Conceptual Database Interaction (Replace with your actual DB logic)
-const db = {
-    async findStock(stock) {
-        return dbData.find(item => item.stock === stock) || null;
-    },
-    async createStock(stock, ipHash) {
-       const newStock = { stock: stock, likes: ipHash ? [{ ip: ipHash }] : [] }
-        dbData.push(newStock)
-        return newStock
-    },
-    async addLike(stockRecord, ipHash) {
-       if (!stockRecord.likes.some(like => like.ip === ipHash)) {
-            stockRecord.likes.push({ ip: ipHash });
-       }
+const Schema = mongoose.Schema;
 
-        return stockRecord;
-    },
-   async resetDB() {
-        dbData = []
-    }
-};
-//stores stock data in memory
-let dbData = []
+const stockSchema = new Schema({
+  stock: { type: String, required: true },
+  likes: [String] // Array of IPs that liked the stock
+});
 
-// Helper function to anonymize IP addresses (using SHA-256 hashing)
-function anonymizeIp(ip) {
-    const hash = crypto.createHash('sha256');
-    hash.update(ip);
-    return hash.digest('hex');
-}
+const Stock = mongoose.model('Stock', stockSchema);
 
 module.exports = function (app) {
 
-    app.route('/api/stock-prices')
-        .get(async function (req, res) {
-            const { stock, like } = req.query;
-            const ip = req.ip;
-            const ipHash = anonymizeIp(ip);
+  app.route('/api/stock-prices')
+    .get(async function (req, res){
+      const stock = req.query.stock;
+      let like = req.query.like;
 
-            if (Array.isArray(stock)) {
-                // Handle two stocks
-                if (stock.length !== 2) {
-                    return res.json({ error: 'Must provide exactly two stocks for comparison.' });
+      if (!stock) {
+        return res.status(400).json({ error: 'Stock is required' });
+      }
+
+      const getStockPrice = async (stockSymbol) => {
+        const fetch = (...args) => import('node-fetch').then(({default: fetch}) => fetch(...args));
+        const url = `https://stock-price-checker-proxy.freecodecamp.rocks/v1/stock/${stockSymbol}/quote`;
+        const response = await fetch(url);
+        const data = await response.json();
+        if (data.symbol) {
+          return {
+            stock: data.symbol,
+            price: data.latestPrice
+          };
+        } else {
+          throw new Error('Stock not found');
+        }
+      };
+
+      const getClientIP = (req) => {
+        //Could use request ip package
+        return req.headers['x-forwarded-for'] || req.connection.remoteAddress;
+      };
+
+
+      if (Array.isArray(stock)) {
+        // Handle multiple stocks
+        try {
+          const stockData = await Promise.all(
+            stock.map(async (stockSymbol) => {
+              const { stock, price } = await getStockPrice(stockSymbol);
+              let stockDoc = await Stock.findOne({ stock: stock });
+
+              if (!stockDoc) {
+                stockDoc = new Stock({ stock: stock, likes: [] });
+              }
+
+              if (like) {
+                const ip = getClientIP(req);
+                if (!stockDoc.likes.includes(ip)) {
+                  stockDoc.likes.push(ip);
+                  await stockDoc.save();
                 }
+              }
 
-                const stockData = [];
+              return {
+                stock: stock,
+                price: price,
+                like: stockDoc.likes.length
+              };
+            })
+          );
 
-                for (const s of stock) {
-                    try {
-                        const stockName = s.toUpperCase();
-                        const response = await fetch(`https://stock-price-checker-proxy.freecodecamp.rocks/v1/stock/${stockName}/quote`); // ADDED /quote
-                        const text = await response.text(); // Get response as TEXT first
+          const rel_likes = stockData.map((item, i) => {
+            return item.like - stockData[(i+1) % 2].like
+          })
+          const response = [
+            {stock: stockData[0].stock, price: stockData[0].price, rel_likes: rel_likes[0]},
+            {stock: stockData[1].stock, price: stockData[1].price, rel_likes: rel_likes[1]}
+          ]
 
-                        let data;
-                        try {
-                            data = JSON.parse(text); // Try to parse as JSON
-                        } catch (parseError) {
-                            console.error("Proxy returned non-JSON response:", text);
-                            stockData.push({ stock: stockName, error: "External API error." });
-                            continue; // Skip to the next stock
-                        }
+          res.json({ stockData: response });
+        } catch (error) {
+          console.error(error);
+          res.status(500).json({ error: 'Error fetching stock prices' });
+        }
+      } else {
+        // Handle single stock
+        try {
+          const { stock: stockName, price } = await getStockPrice(stock);
+          let stockDoc = await Stock.findOne({ stock: stockName });
 
+          if (!stockDoc) {
+            stockDoc = new Stock({ stock: stockName, likes: [] });
+          }
 
-                        if (data === 'Unknown symbol' || data === "Not found" || !data.latestPrice) {
-                            stockData.push({ stock: stockName, error: 'Invalid stock symbol' });
-                            continue;
-                        }
+          if (like) {
+            like = like.toLowerCase() === 'true';
+            const ip = getClientIP(req);
+              if (!stockDoc.likes.includes(ip)) {
+                stockDoc.likes.push(ip);
+                await stockDoc.save();
+              }
+          }
 
-                        let stockRecord = await db.findStock(stockName);
-
-                        if (!stockRecord) {
-                            stockRecord = await db.createStock(stockName, like ? ipHash : null);
-                        } else if (like) {
-                            stockRecord = await db.addLike(stockRecord, ipHash);
-                        }
-
-                        stockData.push({
-                            stock: stockName,
-                            price: data.latestPrice,
-                            likes: stockRecord.likes.length
-                        });
-                    } catch (error) {
-                        console.error("Error fetching stock data:", error);
-                        stockData.push({ stock: s.toUpperCase(), error: "External API error." });
-                    }
-                }
-
-                if (stockData.some(stock => stock.error)) {
-                    return res.json({ stockData })
-                }
-
-
-                // Calculate relative likes
-                const relLikes0 = stockData[0].likes - stockData[1].likes;
-                const relLikes1 = stockData[1].likes - stockData[0].likes;
-
-                stockData[0].rel_likes = relLikes0;
-                stockData[1].rel_likes = relLikes1;
-
-                delete stockData[0].likes;
-                delete stockData[1].likes;
-
-                res.json({ stockData });
-
-
-            } else {
-                // Handle single stock
-                try {
-                    const stockName = stock.toUpperCase();
-                    const response = await fetch(`https://stock-price-checker-proxy.freecodecamp.rocks/v1/stock/${stockName}/quote`); // ADDED /quote
-                    const text = await response.text(); // Get response as TEXT first
-
-                    let data;
-                    try {
-                        data = JSON.parse(text);  // Try to parse as JSON
-                    } catch (parseError) {
-                        console.error("Proxy returned non-JSON response:", text);
-                        return res.status(500).json({ stockData: { error: 'External API error or processing error' } }); // Return error
-                    }
-
-                    if (data === 'Unknown symbol' || data === "Not found" || !data.latestPrice) {
-                        return res.json({ stockData: { error: 'Invalid stock symbol' } });
-                    }
-
-
-                    let stockRecord = await db.findStock(stockName);
-                    if (!stockRecord) {
-                        stockRecord = await db.createStock(stockName, like ? ipHash : null);
-                    } else if (like) {
-                        stockRecord = await db.addLike(stockRecord, ipHash);
-                    }
-
-
-                    res.json({
-                        stockData: {
-                            stock: stockRecord.stock,
-                            price: data.latestPrice,
-                            likes: stockRecord.likes.length
-                        }
-                    });
-
-                } catch (error) {
-                    console.error("Error fetching/processing stock data:", error);
-                    res.status(500).json({ stockData: { error: 'External API error or processing error' } });
-                }
-            }
-        });
+          res.json({ stockData: {
+              stock: stockName,
+              price: price,
+              likes: stockDoc.likes.length
+            } });
+        } catch (error) {
+          console.error(error);
+          res.status(500).json({ error: 'Error fetching stock price' });
+        }
+      }
+    });
 };
-
